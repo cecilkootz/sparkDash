@@ -426,6 +426,7 @@ Copy `.env.example` to `.env` if needed:
 | `HOST_SYS_PATH` | `/host/sys` | Host sys mount |
 | `HOST_ROOT_PATH` | `/host/root` | Host root mount |
 | `SSH_IDENTITY_FILE` | _(unset)_ | Path **inside the process** to a private key (`ssh -i`). Use when the bind-mount is not a default OpenSSH name. |
+| `SSH_KNOWN_HOSTS_FILE` | _(unset)_ | known_hosts path (`-o UserKnownHostsFile`) so accepted host keys persist when `$HOME` is ephemeral or read-only. Parent dir is created. |
 | `SSH_CONTROL_PERSIST_SECONDS` | `60` | Reuse authenticated SSH transports for remote collectors. Set to `0` to disable multiplexing. |
 | `FLEET_ENERGY_JSON_PATH` | `config/fleet-energy.json` | Rolling fleet-energy persistence path |
 
@@ -448,8 +449,10 @@ Copy `.env.example` to `.env` if needed:
 
 - **Shutdown** (per Spark or **Shutdown All** on Overview) runs over SSH:  
   `sudo -n /usr/local/bin/spark-shutdown`  
-  Install that script on each Spark and allow passwordless sudo for it only.
-- **Wake** / **Wake All** send a UDP magic packet (port 9). The MAC is taken from the **enP7s7** interface automatically while the Spark is online (persisted as `detectedMacAddress`). Optionally set a **MAC override** in Edit Spark. Broadcast is derived as `/24` from LAN IP, or `255.255.255.255` if LAN IP is missing.
+  Install that script on each Spark and allow passwordless sudo for it only, e.g. `sudo visudo -f /etc/sudoers.d/spark-shutdown` with (replace `matt` with the SSH user):  
+  `matt ALL=(root) NOPASSWD: /usr/local/bin/spark-shutdown`  
+  The pre-check runs `sudo -n -l /usr/local/bin/spark-shutdown`, so no broader sudo rights are needed.
+- **Wake** / **Wake All** send a UDP magic packet (port 9). The MAC is taken from the **enP7s7** interface automatically while the Spark is online (persisted as `detectedMacAddress`). Optionally set a **MAC override** in Edit Spark. Broadcast is derived as `/24` from LAN IP, or `255.255.255.255` if LAN IP is missing. The packet is also relayed over SSH through an online peer Spark on the same `/24` (a `python3` one-liner), so wake works when the dashboard runs on another subnet or in a Kubernetes pod where the directed broadcast is dropped; the response reports it as `relay`.
 - Batch shutdown only targets **online** Sparks; offline nodes are skipped.
 - Power APIs are mutations: on loopback they follow the local-trust model; a remote bind requires `SPARKDASH_TOKEN`.
 

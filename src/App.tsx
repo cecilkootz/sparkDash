@@ -11,6 +11,7 @@ import { OverviewPage } from "./components/OverviewPage/OverviewPage";
 import { ShowcasePage } from "./components/ShowcasePage/ShowcasePage";
 import { ThemeSwitch } from "./components/ThemeSwitch";
 import { SettingsDialog } from "./components/SettingsDialog";
+import { TokenPrompt } from "./components/TokenPrompt";
 import { GearIcon, BoltIcon } from "./components/ui/icons";
 import { ConnectionBanner } from "./components/ui/ConnectionBanner";
 import { ErrorBanner } from "./components/ui/ErrorBanner";
@@ -414,10 +415,16 @@ function DashboardApp() {
 
 function App() {
   const route = useAppRoute();
-  if (route.mode === "showcase" && route.showcaseSparkId) {
-    return <ShowcasePage sparkId={route.showcaseSparkId} />;
-  }
-  return <DashboardApp />;
+  return (
+    <>
+      {route.mode === "showcase" && route.showcaseSparkId ? (
+        <ShowcasePage sparkId={route.showcaseSparkId} />
+      ) : (
+        <DashboardApp />
+      )}
+      <TokenPrompt />
+    </>
+  );
 }
 
 export default App;

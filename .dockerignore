@@ -7,6 +7,17 @@ dist
 *.log
 .DS_Store
 node_modules/
+.claude
+.github
 
-# Don't skip server/ or config/ in Docker build
-# They are needed at runtime
+# README/demo media; the build does not use them
+assets/*.mp4
+assets/*.gif
+assets/screenshot.jpg
+bench.png
+
+# server/ and config/ are needed at runtime, but local config state
+# (secrets, history) must not be baked into the image
+config/*
+!config/gpu-memory.sh
+!config/settings.json

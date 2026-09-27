@@ -110,6 +110,32 @@ process.once("exit", () => {
   }
 });
 
+let _knownHostsDirReady = null;
+let _knownHostsDirWarned = null;
+
+/**
+ * `-o UserKnownHostsFile=` when SSH_KNOWN_HOSTS_FILE is set, so accept-new pins
+ * land on persistent storage instead of an ephemeral or read-only $HOME.
+ * The directory is created once per path; a failure only warns, because ssh
+ * still connects (it just cannot record the pin).
+ */
+function knownHostsOpts() {
+  const file = process.env.SSH_KNOWN_HOSTS_FILE;
+  if (!file) return [];
+  if (_knownHostsDirReady !== file) {
+    try {
+      fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+      _knownHostsDirReady = file;
+    } catch (err) {
+      if (_knownHostsDirWarned !== file) {
+        _knownHostsDirWarned = file;
+        console.warn(`[ssh] cannot create known_hosts directory for ${file}: ${err.message}`);
+      }
+    }
+  }
+  return ["-o", `UserKnownHostsFile=${file}`];
+}
+
 function sshpassAvailable() {
   if (_sshpassAvailable !== null) return _sshpassAvailable;
   try {
@@ -234,6 +260,7 @@ export function sshCommandSpec(spark, opts = {}) {
     `ConnectTimeout=${SSH_CONNECT_TIMEOUT}`,
     "-o",
     "StrictHostKeyChecking=accept-new",
+    ...knownHostsOpts(),
   ];
 
   const remote = `${user}@${targetHost}`;

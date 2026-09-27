@@ -1,5 +1,8 @@
 import { test } from "node:test";
 import { strict as assert } from "node:assert";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { sshCommandSpec } from "../ssh.js";
 
 const keySpark = {
@@ -63,4 +66,68 @@ test("sshCommandSpec: multiplex:false opts out (tunnels own their connection)", 
   assert.ok(spec.args.includes("ControlMaster=no"));
   assert.ok(spec.args.includes("ControlPath=none"));
   assert.ok(!spec.args.includes("ControlMaster=auto"));
+});
+
+function withKnownHostsFile(file, fn) {
+  const previous = process.env.SSH_KNOWN_HOSTS_FILE;
+  if (file == null) delete process.env.SSH_KNOWN_HOSTS_FILE;
+  else process.env.SSH_KNOWN_HOSTS_FILE = file;
+  try {
+    return fn();
+  } finally {
+    if (previous == null) delete process.env.SSH_KNOWN_HOSTS_FILE;
+    else process.env.SSH_KNOWN_HOSTS_FILE = previous;
+  }
+}
+
+test("sshCommandSpec: no UserKnownHostsFile when SSH_KNOWN_HOSTS_FILE is unset", () => {
+  const spec = withKnownHostsFile(null, () => sshCommandSpec(keySpark, { remoteArgv: ["true"] }));
+  assert.ok(!spec.args.some((a) => a.startsWith("UserKnownHostsFile=")));
+});
+
+test("sshCommandSpec: key auth pins host keys to SSH_KNOWN_HOSTS_FILE and creates its dir once", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "sparkdash-kh-"));
+  const dir = path.join(root, "config", "ssh");
+  const file = path.join(dir, "known_hosts");
+  try {
+    const spec = withKnownHostsFile(file, () => sshCommandSpec(keySpark, { remoteArgv: ["true"] }));
+    const opt = spec.args.indexOf(`UserKnownHostsFile=${file}`);
+    assert.ok(opt > 0 && opt < spec.args.indexOf("--"));
+    assert.equal(spec.args[opt - 1], "-o");
+    assert.equal(fs.statSync(dir).mode & 0o777, 0o700);
+
+    // Cached after the first success: polls must not hit the filesystem again.
+    fs.rmSync(dir, { recursive: true });
+    withKnownHostsFile(file, () => sshCommandSpec(keySpark, { remoteArgv: ["true"] }));
+    assert.equal(fs.existsSync(dir), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("sshCommandSpec: password auth also pins host keys to SSH_KNOWN_HOSTS_FILE", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "sparkdash-kh-"));
+  const file = path.join(root, "pw", "known_hosts");
+  // sshCommandSpec refuses password auth unless sshpass is on PATH.
+  const binDir = path.join(root, "bin");
+  fs.mkdirSync(binDir);
+  fs.writeFileSync(path.join(binDir, "sshpass"), "#!/bin/sh\n", { mode: 0o755 });
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${binDir}:${previousPath}`;
+  try {
+    const spec = withKnownHostsFile(file, () =>
+      sshCommandSpec(
+        { ...keySpark, ssh: { ...keySpark.ssh, auth: "pass", password: "pw-secret" } },
+        { remoteArgv: ["true"] }
+      )
+    );
+    assert.equal(spec.file, "sshpass");
+    const opt = spec.args.indexOf(`UserKnownHostsFile=${file}`);
+    assert.ok(opt > spec.args.indexOf("ssh") && opt < spec.args.indexOf("--"));
+    assert.ok(fs.statSync(path.dirname(file)).isDirectory());
+    assert.ok(!spec.args.join(" ").includes("pw-secret"));
+  } finally {
+    process.env.PATH = previousPath;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });

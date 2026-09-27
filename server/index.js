@@ -20,7 +20,8 @@ import {
 import { authorizeUpgrade, configuredToken, createAuthMiddleware, requireRemoteAuth } from "./auth.js";
 import { inspectHealth } from "./health.js";
 import { getSettings, updateSettings, loadSettings } from "./settings.js";
-import { broadcastForLanIp, effectiveMac, normalizeMac, sendWol } from "./wol.js";
+import { broadcastForLanIp, effectiveMac, normalizeMac, pickWolRelayPeer, wakeWithRelay } from "./wol.js";
+import { SHUTDOWN_BIN, SHUTDOWN_REMOTE_CMD } from "./power.js";
 import {
   decodeBenchManager,
   DECODE_BENCH_DEFAULTS,
@@ -312,7 +313,8 @@ const app = express();
 const server = createServer(app);
 
 app.use(express.json());
-app.use(createAuthMiddleware());
+// The SPA shell and assets stay public so the browser can load the token prompt.
+app.use("/api", createAuthMiddleware());
 
 app.get("/api/health", (_req, res) => {
   res.json(inspectHealth(process.env.BIND_HOST || "127.0.0.1"));
@@ -1414,19 +1416,6 @@ app.delete("/api/sparks/:id/llm/showcase/:sessionId", (req, res) => {
 // These routes are unauthenticated like the rest of the LAN dashboard — do not
 // expose port 5555 beyond a trusted network.
 
-const SHUTDOWN_BIN = "/usr/local/bin/spark-shutdown";
-/**
- * Remote: verify script + passwordless sudo, then background shutdown so SSH
- * returns before the host dies. Failures before backgrounding surface to the UI.
- */
-const SHUTDOWN_REMOTE_CMD = [
-  `test -x ${SHUTDOWN_BIN} || { echo "missing ${SHUTDOWN_BIN}" >&2; exit 127; }`,
-  `sudo -n true || { echo "sudo -n required for ${SHUTDOWN_BIN}" >&2; exit 126; }`,
-  `nohup sudo -n ${SHUTDOWN_BIN} >/dev/null 2>&1 &`,
-  `sleep 0.3`,
-  `exit 0`,
-].join("; ");
-
 function shutdownErrorStatus(msg) {
   if (/timed out|connection refused|unreachable|no route|ECONNREFUSED|ETIMEDOUT/i.test(msg)) {
     return 503;
@@ -1519,9 +1508,36 @@ app.post("/api/sparks/shutdown-all", async (_req, res) => {
   res.json({ success: true, results });
 });
 
+/**
+ * Direct broadcast plus a relay through an online peer on the target's /24:
+ * from a pod or another subnet the directed broadcast is dropped by the router
+ * even though the local send succeeds.
+ */
+async function wakeSpark(spark, cleanMac, peers, isOnline) {
+  const broadcast = broadcastForLanIp(spark.lanIp);
+  const wake = await wakeWithRelay(cleanMac, broadcast, pickWolRelayPeer(spark, peers, isOnline));
+  if (wake.relay && !wake.relay.ok) {
+    console.warn(`[wake] ${spark.id}: relay via ${wake.relay.via} failed: ${wake.relay.error}`);
+  }
+  return wake;
+}
+
+function wakeMessage({ mac, broadcast, relay, error }) {
+  if (error) {
+    return `Magic packet relayed by ${relay?.via} to ${mac} via ${broadcast} (direct send failed: ${error})`;
+  }
+  const note = relay ? (relay.ok ? ` (relayed by ${relay.via})` : ` (relay via ${relay.via} failed)`) : "";
+  return `Magic packet sent to ${mac} via ${broadcast}${note}`;
+}
+
+const isMonitorOnline = (id) => monitors.get(id)?.online === true;
+
 app.post("/api/sparks/wake-all", async (_req, res) => {
   const results = [];
-  for (const spark of registry.sparks) {
+  const sparks = registry.sparks;
+  // Relay peers come from before the loop so one wake cannot change another's pick.
+  const online = new Set(sparks.filter((s) => isMonitorOnline(s.id)).map((s) => s.id));
+  for (const spark of sparks) {
     const cleanMac = effectiveMac(spark);
     if (!cleanMac) {
       results.push({
@@ -1532,9 +1548,12 @@ app.post("/api/sparks/wake-all", async (_req, res) => {
       continue;
     }
     try {
-      const broadcast = broadcastForLanIp(spark.lanIp);
-      const sent = await sendWol(cleanMac, broadcast);
-      results.push({ id: spark.id, ok: true, mac: sent.mac, broadcast: sent.broadcast });
+      const wake = await wakeSpark(spark, cleanMac, sparks, (id) => online.has(id));
+      results.push(
+        wake.ok
+          ? { id: spark.id, ok: true, mac: wake.mac, broadcast: wake.broadcast, relay: wake.relay }
+          : { id: spark.id, ok: false, error: wake.error, relay: wake.relay }
+      );
     } catch (err) {
       results.push({ id: spark.id, ok: false, error: err.message || String(err) });
     }
@@ -1592,18 +1611,17 @@ app.post("/api/sparks/:id/wake", async (req, res) => {
       });
     }
 
-    const broadcast = broadcastForLanIp(spark.lanIp);
-    try {
-      const sent = await sendWol(cleanMac, broadcast);
-      res.json({
-        success: true,
-        message: `Magic packet sent to ${sent.mac} via ${sent.broadcast}`,
-        mac: sent.mac,
-        broadcast: sent.broadcast,
-      });
-    } catch (err) {
-      res.status(500).json({ error: `WoL send failed: ${err.message || String(err)}` });
+    const wake = await wakeSpark(spark, cleanMac, registry.sparks, isMonitorOnline);
+    if (!wake.ok) {
+      return res.status(500).json({ error: `WoL send failed: ${wake.error}`, relay: wake.relay });
     }
+    res.json({
+      success: true,
+      message: wakeMessage(wake),
+      mac: wake.mac,
+      broadcast: wake.broadcast,
+      relay: wake.relay,
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

@@ -36,6 +36,7 @@ It also supports **non-Spark units**: any Linux machine with an NVIDIA GPU (e.g.
 - [Tailnet monitoring](#tailnet-monitoring)
 - [Full changelog](./CHANGELOG.md)
 - [Quick start](#quick-start)
+- [Kubernetes](#kubernetes)
 - [Architecture](#architecture)
 - [Tech stack](#tech-stack)
 - [Repository layout](#repository-layout)
@@ -272,6 +273,25 @@ If the key file has a non-default name (e.g. `id_ed25519_shared`), mount it **as
 
 ---
 
+## Kubernetes
+
+CI publishes `ghcr.io/cecilkootz/sparkdash` (linux/arm64): `latest` from `main`, `sha-<short>`, and `<version>` / `<major>.<minor>` from `v*` tags. The Helm chart lives in the home-infra repo at `charts/sparkdash`.
+
+In a pod every unit is remote, polled over SSH with key auth (no host mounts, `nsenter`, or privileges). The image runs as uid/gid 1000 with a read-only root filesystem; it writes only to `/app/config` (PVC) and `/tmp` (emptyDir). The SPA asks for the token on first load.
+
+| Variable | Pod value |
+|----------|-----------|
+| `BIND_HOST` / `PORT` / `NODE_ENV` | `0.0.0.0` / `5555` / `production` |
+| `SPARKDASH_TOKEN` | From a Secret; required on `/api/*` and `/ws` |
+| `SPARKDASH_ALLOW_OPEN_REMOTE` | `0` |
+| `SPARKDASH_SECRETS_KEY` | From a Secret |
+| `SSH_IDENTITY_FILE` | `/etc/sparkdash/ssh/id_ed25519` (Secret, mode `0440`, readable via `fsGroup`) |
+| `SSH_KNOWN_HOSTS_FILE` | `/app/config/ssh/known_hosts`, so accepted host keys survive restarts |
+
+Probe with `tcpSocket` on 5555; `/api/health` requires the token.
+
+---
+
 ## Architecture
 
 Design principle: **one Spark model, N instances**. Every unit is a record in `config/sparks.json` with a `kind` field (`spark` or `host`). The same `SparkMonitor`, `SystemCollector`, and `LlmProbe` code runs for all of them. Adding a unit is a config change, not a code change.
@@ -426,6 +446,7 @@ Copy `.env.example` to `.env` if needed:
 | `HOST_SYS_PATH` | `/host/sys` | Host sys mount |
 | `HOST_ROOT_PATH` | `/host/root` | Host root mount |
 | `SSH_IDENTITY_FILE` | _(unset)_ | Path **inside the process** to a private key (`ssh -i`). Use when the bind-mount is not a default OpenSSH name. |
+| `SSH_KNOWN_HOSTS_FILE` | _(unset)_ | known_hosts path (`-o UserKnownHostsFile`) so accepted host keys persist when `$HOME` is ephemeral or read-only. Parent dir is created. |
 | `SSH_CONTROL_PERSIST_SECONDS` | `60` | Reuse authenticated SSH transports for remote collectors. Set to `0` to disable multiplexing. |
 | `FLEET_ENERGY_JSON_PATH` | `config/fleet-energy.json` | Rolling fleet-energy persistence path |
 
@@ -448,8 +469,10 @@ Copy `.env.example` to `.env` if needed:
 
 - **Shutdown** (per Spark or **Shutdown All** on Overview) runs over SSH:  
   `sudo -n /usr/local/bin/spark-shutdown`  
-  Install that script on each Spark and allow passwordless sudo for it only.
-- **Wake** / **Wake All** send a UDP magic packet (port 9). The MAC is taken from the **enP7s7** interface automatically while the Spark is online (persisted as `detectedMacAddress`). Optionally set a **MAC override** in Edit Spark. Broadcast is derived as `/24` from LAN IP, or `255.255.255.255` if LAN IP is missing.
+  Install that script on each Spark and allow passwordless sudo for it only, e.g. `sudo visudo -f /etc/sudoers.d/spark-shutdown` with (replace `matt` with the SSH user):  
+  `matt ALL=(root) NOPASSWD: /usr/local/bin/spark-shutdown`  
+  The pre-check runs `sudo -n -l /usr/local/bin/spark-shutdown`, so no broader sudo rights are needed.
+- **Wake** / **Wake All** send a UDP magic packet (port 9). The MAC is taken from the **enP7s7** interface automatically while the Spark is online (persisted as `detectedMacAddress`). Optionally set a **MAC override** in Edit Spark. Broadcast is derived as `/24` from LAN IP, or `255.255.255.255` if LAN IP is missing. The packet is also relayed over SSH through an online peer Spark on the same `/24` (a `python3` one-liner), so wake works when the dashboard runs on another subnet or in a Kubernetes pod where the directed broadcast is dropped; the response reports it as `relay`.
 - Batch shutdown only targets **online** Sparks; offline nodes are skipped.
 - Power APIs are mutations: on loopback they follow the local-trust model; a remote bind requires `SPARKDASH_TOKEN`.
 

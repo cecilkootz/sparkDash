@@ -2,10 +2,15 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import type { SparkSnapshot, WsSnapshot } from "../api/types";
 import { ingestSnapshots } from "./metricsStore";
 import { OVERVIEW_ID } from "../constants";
+import { probeAuth } from "../api/client";
+import { readStoredToken } from "../api/token";
 
-const TOKEN = (typeof localStorage !== "undefined" && localStorage.getItem("sparkdashToken")) || "";
-const WS_URL = `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/ws${TOKEN ? `?token=${encodeURIComponent(TOKEN)}` : ""}`;
 const RECONNECT_DELAY = 2000;
+
+function wsUrl() {
+  const token = readStoredToken();
+  return `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/ws${token ? `?token=${encodeURIComponent(token)}` : ""}`;
+}
 
 /**
  * useSnapshot — connects to the WebSocket and exposes live spark data.
@@ -23,6 +28,7 @@ export function useSnapshot() {
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   /** When false, onclose must not schedule reconnect (unmount / intentional close). */
   const shouldReconnect = useRef(true);
+  const probingAuth = useRef(false);
 
   // ─── Connect ─────────────────────────────────────────────
   const connect = useCallback(() => {
@@ -32,10 +38,12 @@ export function useSnapshot() {
     // Avoid duplicate sockets while OPEN or still CONNECTING
     if (state === WebSocket.OPEN || state === WebSocket.CONNECTING) return;
 
-    const ws = new WebSocket(WS_URL);
+    const ws = new WebSocket(wsUrl());
     wsRef.current = ws;
+    let opened = false;
 
     ws.onopen = () => {
+      opened = true;
       // A socket alone is not healthy; wait for one valid snapshot.
       setConnected(false);
       console.log("[ws] connected");
@@ -77,6 +85,12 @@ export function useSnapshot() {
       setConnected(false);
       wsRef.current = null;
       if (!shouldReconnect.current) return;
+      if (!opened && !probingAuth.current) {
+        probingAuth.current = true;
+        void probeAuth().finally(() => {
+          probingAuth.current = false;
+        });
+      }
       reconnectTimer.current = setTimeout(connect, RECONNECT_DELAY);
     };
 

@@ -302,6 +302,29 @@ function orderedSnapshots() {
     .map((m) => m.snapshot());
 }
 
+/** Cluster membership comes from the registry so regrouping never restarts a monitor. */
+function snapshotsWithClusters() {
+  const clusterOf = new Map();
+  for (const c of registry.clusters) for (const id of c.sparkIds) clusterOf.set(id, c.id);
+  return orderedSnapshots().map((s) => ({ ...s, clusterId: clusterOf.get(s.id) ?? null }));
+}
+
+/**
+ * Sparks targeted by a batch action: all, or one cluster's members when
+ * `?cluster=<id>` is given. Returns null (after replying 404) for an unknown cluster.
+ */
+function batchTargets(req, res) {
+  const clusterId = typeof req.query.cluster === "string" ? req.query.cluster : "";
+  if (!clusterId) return registry.sparks;
+  const cluster = registry.getCluster(clusterId);
+  if (!cluster) {
+    res.status(404).json({ error: "Cluster not found" });
+    return null;
+  }
+  const members = new Set(cluster.sparkIds);
+  return registry.sparks.filter((s) => members.has(s.id));
+}
+
 const fleetEnergyRuntime = createFleetEnergyRuntime({
   tracker: fleetEnergyTracker,
   orderedSnapshots,
@@ -424,6 +447,16 @@ app.patch("/api/sparks/:id", (req, res) => {
       sshKeys.length > 0 &&
       sshKeys.every((k) => k === "password");
 
+    if (keys.length > 0 && sshKeys.length === 0 && keys.every((k) => k === "clusterId")) {
+      const spark = registry.updateSpark(req.params.id, body);
+      forceBroadcast();
+      return res.json({
+        success: true,
+        spark: registry.toPublic(spark),
+        hasPassword: registry.hasPassword(req.params.id),
+      });
+    }
+
     if (passwordOnly && body.ssh?.password) {
       const spark = registry.setPassword(req.params.id, body.ssh.password);
       const mon = monitors.get(req.params.id);
@@ -472,6 +505,42 @@ app.put("/api/sparks/order", (req, res) => {
     res.json({ success: true, sparks });
   } catch (err) {
     res.status(400).json({ error: err.message });
+  }
+});
+
+// ─── Clusters ─────────────────────────────────────────────
+app.get("/api/clusters", (_req, res) => {
+  res.json({ clusters: registry.clusters });
+});
+
+app.post("/api/clusters", (req, res) => {
+  try {
+    const cluster = registry.addCluster(req.body || {});
+    forceBroadcast();
+    res.json({ success: true, cluster, clusters: registry.clusters });
+  } catch (err) {
+    res.status(err.status || 400).json({ error: err.message });
+  }
+});
+
+app.patch("/api/clusters/:id", (req, res) => {
+  try {
+    const cluster = registry.updateCluster(req.params.id, req.body || {});
+    forceBroadcast();
+    res.json({ success: true, cluster, clusters: registry.clusters });
+  } catch (err) {
+    res.status(err.status || 400).json({ error: err.message });
+  }
+});
+
+app.delete("/api/clusters/:id", (req, res) => {
+  try {
+    const removed = registry.removeCluster(req.params.id);
+    if (!removed) return res.status(404).json({ error: "Cluster not found" });
+    forceBroadcast();
+    res.json({ success: true, removed, clusters: registry.clusters });
+  } catch (err) {
+    res.status(err.status || 400).json({ error: err.message });
   }
 });
 
@@ -582,9 +651,11 @@ app.post("/api/sparks/:id/refresh/:domain", async (req, res) => {
 // Batch route first (like shutdown-all/wake-all): a plain Sparks-suffixed
 // path (3 segments) that cannot be captured by /api/sparks/:id/hermes/* (4).
 /** One-click `hermes update` on every Spark with hermes monitoring enabled. */
-app.post("/api/sparks/hermes/update-all", async (_req, res) => {
+app.post("/api/sparks/hermes/update-all", async (req, res) => {
+  const targets = batchTargets(req, res);
+  if (!targets) return;
   const results = [];
-  for (const spark of registry.sparks) {
+  for (const spark of targets) {
     const monitor = monitors.get(spark.id);
     const entry = { id: spark.id, name: spark.name, ok: false, started: false, skipped: false };
     if (!spark.hermesMonitoring || !monitor) {
@@ -1474,14 +1545,13 @@ function initiateSparkShutdown(spark) {
 }
 
 /** Batch routes first so they never collide with /:id/* if routing changes. */
-app.post("/api/sparks/shutdown-all", async (_req, res) => {
+app.post("/api/sparks/shutdown-all", async (req, res) => {
+  const targets = batchTargets(req, res);
+  if (!targets) return;
   const results = [];
   // Remotes first, local last — shutting down the dashboard host mid-loop would
   // skip remaining Sparks.
-  const ordered = [
-    ...registry.sparks.filter((s) => !s.isLocal),
-    ...registry.sparks.filter((s) => s.isLocal),
-  ];
+  const ordered = [...targets.filter((s) => !s.isLocal), ...targets.filter((s) => s.isLocal)];
   for (const spark of ordered) {
     const monitor = monitors.get(spark.id);
     if (!monitor?.online) {
@@ -1532,12 +1602,15 @@ function wakeMessage({ mac, broadcast, relay, error }) {
 
 const isMonitorOnline = (id) => monitors.get(id)?.online === true;
 
-app.post("/api/sparks/wake-all", async (_req, res) => {
+app.post("/api/sparks/wake-all", async (req, res) => {
+  const targets = batchTargets(req, res);
+  if (!targets) return;
   const results = [];
+  // Relay peers span the whole fleet: a cluster's own members may all be asleep.
   const sparks = registry.sparks;
   // Relay peers come from before the loop so one wake cannot change another's pick.
   const online = new Set(sparks.filter((s) => isMonitorOnline(s.id)).map((s) => s.id));
-  for (const spark of sparks) {
+  for (const spark of targets) {
     const cleanMac = effectiveMac(spark);
     if (!cleanMac) {
       results.push({
@@ -1672,7 +1745,8 @@ function buildSnapshotPayload() {
   return JSON.stringify({
     type: "snapshot",
     generatedAt: Date.now(),
-    sparks: orderedSnapshots(),
+    sparks: snapshotsWithClusters(),
+    clusters: registry.clusters,
     refreshInterval: getSettings().pollIntervalMs,
   });
 }

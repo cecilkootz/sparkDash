@@ -1,15 +1,18 @@
-import { useEffect, useState } from "react";
-import type { SparkSnapshot } from "../../api/types";
+import { useState } from "react";
+import type { Cluster, SparkSnapshot } from "../../api/types";
 import { isWorkerSpark, resolveSparkRole } from "../../api/sparkRole";
-import { shutdownAllSparks, updateAllHermes, wakeAllSparks } from "../../api/client";
-import { ConfirmShutdownDialog } from "../ConfirmShutdownDialog";
+import { clusterStats, groupByCluster } from "../../api/clusters";
 import { MetricBar } from "../ui/MetricBar";
 import { FleetEnergyCard } from "./FleetEnergyCard";
 import { FleetAlertStrip } from "./FleetAlertStrip";
-import { ActivityIcon, PowerOffIcon, PowerOnIcon, RotateIcon } from "../ui/icons";
+import { BatchActions } from "./BatchActions";
+import { ActivityIcon, EditIcon, PlusIcon } from "../ui/icons";
 
 interface OverviewPageProps {
   sparks: SparkSnapshot[];
+  clusters?: Cluster[];
+  /** null opens the dialog to create a cluster. */
+  onEditCluster?: (cluster: Cluster | null) => void;
   hideOffline?: boolean;
   hideWorkers?: boolean;
   showFleetEnergy?: boolean;
@@ -391,8 +394,61 @@ function SparkCard({
   );
 }
 
+function ClusterHeader({
+  cluster,
+  members,
+  onEdit,
+}: {
+  cluster: Cluster;
+  members: SparkSnapshot[];
+  onEdit?: (cluster: Cluster) => void;
+}) {
+  const st = clusterStats(members);
+  const stats: { label: string; value: string }[] = [
+    { label: "Online", value: `${st.online}/${st.total}` },
+  ];
+  if (st.online > 0) {
+    stats.push({ label: "GPU power", value: `${Math.round(st.gpuPowerW)} W` });
+    if (st.gpuUsageAvg != null) stats.push({ label: "GPU avg", value: `${Math.round(st.gpuUsageAvg)}%` });
+    if (st.memTotalMb > 0) {
+      stats.push({ label: "Memory", value: `${formatMb(st.memUsedMb)} / ${formatMb(st.memTotalMb)}` });
+    }
+    if (st.decodeTps > 0) stats.push({ label: "Decode", value: `${st.decodeTps.toFixed(1)} tok/s` });
+  }
+  return (
+    <div className="flex flex-wrap items-end justify-between gap-3">
+      <div className="flex min-w-0 flex-wrap items-end gap-x-6 gap-y-2">
+        <h2 className="flex items-center gap-1.5 text-lg font-semibold text-text-strong">
+          {cluster.name}
+          {onEdit && (
+            <button
+              type="button"
+              onClick={() => onEdit(cluster)}
+              title="Edit cluster"
+              aria-label={`Edit cluster ${cluster.name}`}
+              className="rounded p-1 text-muted transition-colors hover:bg-surface-hover hover:text-text"
+            >
+              <EditIcon className="h-3.5 w-3.5" />
+            </button>
+          )}
+        </h2>
+        <div className="flex flex-wrap gap-x-5 gap-y-1">
+          {stats.map((stat) => (
+            <MiniStat key={stat.label} label={stat.label} value={stat.value} />
+          ))}
+        </div>
+      </div>
+      <div className="flex flex-wrap items-end justify-end gap-3">
+        <BatchActions sparks={members} cluster={cluster} />
+      </div>
+    </div>
+  );
+}
+
 export function OverviewPage({
   sparks,
+  clusters = [],
+  onEditCluster,
   hideOffline = false,
   hideWorkers = false,
   showFleetEnergy = false,
@@ -413,130 +469,6 @@ export function OverviewPage({
     return true;
   });
   const hiddenWorkerCount = hideWorkers ? sparks.filter(isWorkerSpark).length : 0;
-  const [batchLoading, setBatchLoading] = useState(false);
-  const [batchMsg, setBatchMsg] = useState<{ text: string; tone: "ok" | "err" } | null>(null);
-  const [shutdownOpen, setShutdownOpen] = useState(false);
-  /** Spark ids we started a batch Hermes update on; drives the live progress bar. */
-  const [batchRun, setBatchRun] = useState<string[] | null>(null);
-
-  const onlineShutdownCount = sparks.filter((s) => s.online).length;
-  const hermesMonitoredCount = sparks.filter((s) => s.hermes?.monitoring).length;
-  const hermesPendingUpdateCount = sparks.filter((s) => s.hermes?.updateAvailable === true).length;
-
-  // Live batch progress — counted from WS snapshots, not from the one-shot HTTP response.
-  const batchProg = (() => {
-    if (!batchRun || batchRun.length === 0) return null;
-    let done = 0;
-    let failed = 0;
-    for (const id of batchRun) {
-      const h = sparks.find((s) => s.id === id)?.hermes;
-      if (!h) continue;
-      if (h.status === "error") {
-        done += 1;
-        failed += 1;
-      } else if (h.status === "success" || h.finishedAt != null) {
-        done += 1;
-      }
-    }
-    return { total: batchRun.length, done, failed };
-  })();
-
-  // Once every started update has settled (success/error), dismiss the progress bar.
-  useEffect(() => {
-    if (!batchRun || batchRun.length === 0) return;
-    const settled = batchRun.reduce((n, id) => {
-      const h = sparks.find((s) => s.id === id)?.hermes;
-      if (!h) return n;
-      return n + (h.status === "success" || h.status === "error" || h.finishedAt != null ? 1 : 0);
-    }, 0);
-    if (settled === batchRun.length) {
-      const t = setTimeout(() => setBatchRun(null), 6000);
-      return () => clearTimeout(t);
-    }
-  }, [batchRun, sparks]);
-
-  async function handleUpdateAllHermes() {
-    if (hermesMonitoredCount === 0) return;
-    setBatchLoading(true);
-    setBatchMsg(null);
-    try {
-      const res = await updateAllHermes();
-      const started = res.results.filter((r) => r.started);
-      const skipped = res.results.filter((r) => r.skipped).length;
-      const failed = res.results.filter((r) => !r.ok && !r.skipped).length;
-      const parts = [`${started.length} update${started.length === 1 ? "" : "s"} started`];
-      if (skipped) parts.push(`${skipped} skipped`);
-      if (failed) parts.push(`${failed} failed`);
-      setBatchMsg({
-        text: parts.join(", "),
-        tone: failed === 0 ? "ok" : "err",
-      });
-      // Merge with any in-flight batch instead of replacing (server may skip
-      // already-running jobs, which must not clear a live progress bar).
-      setBatchRun((prev) => {
-        const ids = started.map((r) => r.id);
-        if (ids.length === 0) return prev;
-        return [...new Set([...(prev ?? []), ...ids])];
-      });
-    } catch (err: unknown) {
-      setBatchMsg({
-        text: err instanceof Error ? err.message : "Batch hermes update failed",
-        tone: "err",
-      });
-    } finally {
-      setBatchLoading(false);
-      setTimeout(() => setBatchMsg(null), 6000);
-    }
-  }
-
-  async function handleShutdownAll() {
-    if (onlineShutdownCount === 0) return;
-    setBatchLoading(true);
-    setBatchMsg(null);
-    try {
-      const res = await shutdownAllSparks();
-      const ok = res.results.filter((r) => r.ok).length;
-      const fail = res.results.filter((r) => !r.ok && !r.skipped).length;
-      const skipped = res.results.filter((r) => r.skipped).length;
-      const parts = [`${ok} shut down`];
-      if (fail) parts.push(`${fail} failed`);
-      if (skipped) parts.push(`${skipped} skipped`);
-      setBatchMsg({
-        text: parts.join(", "),
-        tone: fail === 0 ? "ok" : "err",
-      });
-    } catch (err: unknown) {
-      setBatchMsg({
-        text: err instanceof Error ? err.message : "Batch shutdown failed",
-        tone: "err",
-      });
-    } finally {
-      setBatchLoading(false);
-      setTimeout(() => setBatchMsg(null), 6000);
-    }
-  }
-
-  async function handleWakeAll() {
-    setBatchLoading(true);
-    setBatchMsg(null);
-    try {
-      const res = await wakeAllSparks();
-      const ok = res.results.filter((r) => r.ok).length;
-      const fail = res.results.filter((r) => !r.ok).length;
-      setBatchMsg({
-        text: fail === 0 ? `${ok} wake packet(s) sent` : `${ok} sent, ${fail} failed`,
-        tone: fail === 0 ? "ok" : "err",
-      });
-    } catch (err: unknown) {
-      setBatchMsg({
-        text: err instanceof Error ? err.message : "Batch wake failed",
-        tone: "err",
-      });
-    } finally {
-      setBatchLoading(false);
-      setTimeout(() => setBatchMsg(null), 6000);
-    }
-  }
 
   if (withoutWorkers.length === 0 || (hideOffline && withoutWorkers.every((spark) => !spark.online))) {
     const allWorkersHidden = hideWorkers && sparks.length > 0 && withoutWorkers.length === 0;
@@ -563,6 +495,33 @@ export function OverviewPage({
   }
 
   const onlineCount = visibleSparks.filter((s) => s.online).length;
+  const visibleIds = new Set(visibleSparks.map((s) => s.id));
+  // Sections use every member (stats + batch actions cover the whole cluster);
+  // cards are filtered. A filtered-out section is dropped unless the cluster is empty.
+  const sections = groupByCluster(sparks, clusters)
+    .map((g) => ({ ...g, cards: g.sparks.filter((s) => visibleIds.has(s.id)) }))
+    .filter((g) => g.cards.length > 0 || (g.cluster && g.sparks.length === 0));
+
+  const renderGrid = (cards: SparkSnapshot[], emptyText: string) => (
+    <div className="overview-page grid sm:grid-cols-2 lg:grid-cols-3" style={{ gap: "var(--density-page-gap)" }}>
+      {cards.length === 0 && (
+        <p className="panel p-6 text-sm text-muted sm:col-span-2 lg:col-span-3">{emptyText}</p>
+      )}
+      {cards.map((spark) => (
+        <SparkCard
+          key={spark.id}
+          spark={spark}
+          headSparkName={
+            spark.workerHeadId
+              ? sparks.find((s) => s.id === spark.workerHeadId)?.name ?? null
+              : null
+          }
+          temperatureUnit={temperatureUnit}
+          onSelect={onSelectSpark}
+        />
+      ))}
+    </div>
+  );
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "var(--density-overview-rhythm)" }}>
@@ -576,88 +535,17 @@ export function OverviewPage({
           Overview
         </h1>
         <div className="flex flex-wrap items-end justify-end gap-3">
-          {batchMsg && (
-            <span className={`text-[11px] ${batchMsg.tone === "ok" ? "text-success" : "text-danger"}`}>
-              {batchMsg.text}
-            </span>
-          )}
-          {batchProg && (
-            <div className="flex flex-col items-end gap-1">
-              <span className="flex items-center gap-1.5 text-[11px] text-muted">
-                <RotateIcon className="h-3 w-3" />
-                Updating Hermes — {batchProg.done}/{batchProg.total}
-                {batchProg.failed > 0 && (
-                  <span className="text-danger">({batchProg.failed} failed)</span>
-                )}
-                <button
-                  type="button"
-                  onClick={() => setBatchRun(null)}
-                  aria-label="Dismiss update progress"
-                  title="Dismiss"
-                  className="rounded p-0.5 text-muted transition-colors hover:bg-surface-hover hover:text-text"
-                >
-                  <span className="text-xs leading-none">✕</span>
-                </button>
-              </span>
-              <div className="h-1 w-36 overflow-hidden rounded-full bg-border">
-                <div
-                  className={`h-full rounded-full transition-[width] duration-300 ease-out ${
-                    batchProg.failed > 0 ? "bg-danger" : "bg-accent"
-                  }`}
-                  style={{
-                    width: `${batchProg.total > 0 ? Math.round((batchProg.done / batchProg.total) * 100) : 0}%`,
-                  }}
-                />
-              </div>
-            </div>
-          )}
-          {sparks.length > 0 && (
-            <div className="flex flex-wrap items-center justify-end gap-1.5">
-              {hermesMonitoredCount > 0 && (
-                <button
-                  type="button"
-                  onClick={() => void handleUpdateAllHermes()}
-                  disabled={batchLoading}
-                  title="Run `hermes update` on every Spark with Hermes Agent enabled"
-                  className={`flex items-center gap-1 rounded-md border bg-surface-elevated px-2.5 py-1.5 text-[11px] transition-colors disabled:opacity-50 ${
-                    hermesPendingUpdateCount > 0
-                      ? "border-warning/40 text-warning hover:bg-warning/15"
-                      : "border-border text-muted hover:bg-surface-hover hover:text-text"
-                  }`}
-                >
-                  <RotateIcon className="h-3 w-3" />
-                  Update Hermes
-                  {hermesPendingUpdateCount > 0 && (
-                    <span
-                      className="ml-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-warning px-1 text-[9px] font-bold leading-none text-white"
-                      title={`${hermesPendingUpdateCount} Spark${hermesPendingUpdateCount === 1 ? "" : "s"} with a Hermes update available`}
-                    >
-                      {hermesPendingUpdateCount}
-                    </span>
-                  )}
-                </button>
-              )}
-              <button
-                type="button"
-                onClick={() => void handleWakeAll()}
-                disabled={batchLoading}
-                title="Wake all Sparks that have a MAC configured (WoL)"
-                className="flex items-center gap-1 rounded-md border border-border bg-surface-elevated px-2.5 py-1.5 text-[11px] text-muted hover:bg-success/20 hover:text-success transition-colors disabled:opacity-50"
-              >
-                <PowerOnIcon className="h-3 w-3" />
-                Wake All
-              </button>
-              <button
-                type="button"
-                onClick={() => setShutdownOpen(true)}
-                disabled={batchLoading || onlineShutdownCount === 0}
-                title="Shut down all online Sparks"
-                className="flex items-center gap-1 rounded-md border border-border bg-surface-elevated px-2.5 py-1.5 text-[11px] text-muted transition-colors hover:bg-danger/20 hover:text-danger disabled:opacity-50"
-              >
-                <PowerOffIcon className="h-3 w-3" />
-                Shutdown All
-              </button>
-            </div>
+          <BatchActions sparks={sparks} />
+          {onEditCluster && (
+            <button
+              type="button"
+              onClick={() => onEditCluster(null)}
+              title="Group Sparks into a cluster"
+              className="flex items-center gap-1 rounded-md border border-border bg-surface-elevated px-2.5 py-1.5 text-[11px] text-muted transition-colors hover:bg-surface-hover hover:text-text"
+            >
+              <PlusIcon className="h-3 w-3" />
+              New cluster
+            </button>
           )}
           <span className="online-chip">
             <span className="dot" />
@@ -692,34 +580,27 @@ export function OverviewPage({
         </select>
       </div>
       ) : null}
-      <ConfirmShutdownDialog
-        open={shutdownOpen}
-        onClose={() => setShutdownOpen(false)}
-        onConfirm={handleShutdownAll}
-        title="Shutdown All"
-        description={`Gracefully shut down all ${onlineShutdownCount} online Spark${onlineShutdownCount === 1 ? "" : "s"}? Offline nodes will be skipped.`}
-        confirmLabel="Shut down all"
-      />
-      <div className="overview-page grid sm:grid-cols-2 lg:grid-cols-3" style={{ gap: "var(--density-page-gap)" }}>
-        {visibleSparks.length === 0 && (
-          <p className="panel p-6 text-sm text-muted sm:col-span-2 lg:col-span-3">
-            No units match the current search and status filters.
-          </p>
-        )}
-        {visibleSparks.map((spark) => (
-          <SparkCard
-            key={spark.id}
-            spark={spark}
-            headSparkName={
-              spark.workerHeadId
-                ? sparks.find((s) => s.id === spark.workerHeadId)?.name ?? null
-                : null
-            }
-            temperatureUnit={temperatureUnit}
-            onSelect={onSelectSpark}
-          />
-        ))}
-      </div>
+      {clusters.length === 0 ? (
+        renderGrid(visibleSparks, "No units match the current search and status filters.")
+      ) : sections.length === 0 ? (
+        renderGrid([], "No units match the current search and status filters.")
+      ) : (
+        sections.map((g) => (
+          <section
+            key={g.cluster?.id ?? "ungrouped"}
+            className="flex flex-col"
+            style={{ gap: "var(--density-page-gap)" }}
+            aria-label={g.cluster ? `Cluster ${g.cluster.name}` : "Ungrouped Sparks"}
+          >
+            {g.cluster ? (
+              <ClusterHeader cluster={g.cluster} members={g.sparks} onEdit={onEditCluster} />
+            ) : (
+              <h2 className="text-lg font-semibold text-text-strong">Ungrouped</h2>
+            )}
+            {renderGrid(g.cards, "No Sparks in this cluster yet. Edit it to add members.")}
+          </section>
+        ))
+      )}
     </div>
   );
 }

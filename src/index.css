@@ -388,6 +388,26 @@ input:disabled {
   min-width: 0;
 }
 
+/* Cluster name ahead of its group of tabs */
+.pill-group-label {
+  padding: 0 4px 0 10px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-muted);
+  white-space: nowrap;
+}
+
+.mobile-menu-group {
+  padding: 10px 14px 4px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-muted);
+}
+
 /* In dark themes the pill reads better without the warm tint */
 [data-theme="dark"] .pill-nav,
 [data-theme="oled"] .pill-nav {

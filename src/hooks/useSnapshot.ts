@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from "react";
-import type { SparkSnapshot, WsSnapshot } from "../api/types";
+import type { Cluster, SparkSnapshot, WsSnapshot } from "../api/types";
 import { ingestSnapshots } from "./metricsStore";
 import { OVERVIEW_ID } from "../constants";
 import { probeAuth } from "../api/client";
@@ -18,6 +18,7 @@ function wsUrl() {
  */
 export function useSnapshot() {
   const [sparks, setSparks] = useState<SparkSnapshot[]>([]);
+  const [clusters, setClusters] = useState<Cluster[]>([]);
   const [connected, setConnected] = useState(false);
   const [lastValidSnapshotAt, setLastValidSnapshotAt] = useState<number | null>(null);
   const [snapshotGeneratedAt, setSnapshotGeneratedAt] = useState<number | null>(null);
@@ -57,6 +58,7 @@ export function useSnapshot() {
           // Feed the central history store (8b) before notifying React state.
           ingestSnapshots(msg.sparks, msg.generatedAt ?? receivedAt);
           setSparks(msg.sparks);
+          setClusters(Array.isArray(msg.clusters) ? msg.clusters : []);
           setConnected(true);
           setLastValidSnapshotAt(receivedAt);
           setSnapshotGeneratedAt(
@@ -122,6 +124,7 @@ export function useSnapshot() {
 
   return {
     sparks,
+    clusters,
     connected,
     activeId,
     setActiveId,

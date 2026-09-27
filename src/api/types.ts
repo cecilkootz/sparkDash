@@ -61,6 +61,8 @@ export interface SparkConfig {
    * Only meaningful when role is worker.
    */
   workerHeadId?: string | null;
+  /** Cluster this Spark is grouped under; null when ungrouped. */
+  clusterId?: string | null;
   /**
    * Standalone only: probe local LLM and show the LLM card (default true).
    * Forced true for head, forced false for worker.
@@ -496,6 +498,7 @@ export interface SparkSnapshot {
   workerDerivedLabel?: string | null;
   /** Optional head Spark id when role is worker */
   workerHeadId?: string | null;
+  clusterId?: string | null;
   /** Standalone: whether LLM is probed (head always true, worker always false) */
   llmMonitoring?: boolean;
   /** LLM server port (first port, for backward compat) */
@@ -517,11 +520,20 @@ export interface SparkSnapshot {
 }
 
 // ─── WebSocket envelope ───────────────────────────────────
+export interface Cluster {
+  id: string;
+  name: string;
+  /** Member Spark ids in tab order. */
+  sparkIds: string[];
+}
+
 export interface WsSnapshot {
   type: "snapshot";
   /** Server generation time; optional while clients and servers roll independently. */
   generatedAt?: number;
   sparks: SparkSnapshot[];
+  /** Absent from servers that predate clusters. */
+  clusters?: Cluster[];
   refreshInterval: number;
 }
 

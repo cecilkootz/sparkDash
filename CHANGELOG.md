@@ -10,6 +10,7 @@ Format: version sections are listed newest first.
 ## [Unreleased]
 
 ### Added
+- **Clusters** — group Sparks into named clusters (**New cluster** on Overview, or the **Cluster** picker in Edit Spark). Overview shows one section per cluster with online count, GPU power, average GPU utilization, memory and decode tok/s, plus Wake / Shutdown / Update Hermes scoped to that cluster; tabs are grouped under cluster labels and drag-reorder within their group. API: `GET/POST /api/clusters`, `PATCH/DELETE /api/clusters/:id`, and `?cluster=<id>` on the batch power / Hermes routes.
 - **Custom prefill size** — type any token count from 256–300k in the prefill benchmark (plus the preset chips).
 - **q27 LLM backend** — detect signalnine/q27 via `/v1/models` ownership or `q27_*` Prometheus series; report backend-aware decode/prefill rates and inference-health telemetry.
 - **Hide worker nodes** — Settings toggle. Worker-role Sparks drop off Overview cards and the tab bar (the open worker tab stays). Direct URLs and batch Wake / Shutdown / Hermes still include them.

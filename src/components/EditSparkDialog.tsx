@@ -2,13 +2,14 @@ import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   deleteSpark,
+  fetchClusters,
   fetchSparks,
   setSparkPassword,
   testSpark,
   testSparkConfig,
   updateSpark,
 } from "../api/client";
-import type { SparkConfig, SparkRole, SparkTestResponse } from "../api/types";
+import type { Cluster, SparkConfig, SparkRole, SparkTestResponse } from "../api/types";
 import { resolveSparkRole } from "../api/sparkRole";
 import { useModalPresence } from "../hooks/useModalPresence";
 import { InfoIcon } from "./ui/icons";
@@ -47,6 +48,7 @@ export function EditSparkDialog({
   const [savedConfig, setSavedConfig] = useState<SparkConfig | null>(null);
   /** All Sparks — used for the worker head picker. */
   const [allSparks, setAllSparks] = useState<SparkConfig[]>([]);
+  const [clusters, setClusters] = useState<Cluster[]>([]);
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [testing, setTesting] = useState(false);
@@ -82,10 +84,11 @@ export function EditSparkDialog({
     }
     let cancelled = false;
     setLoading(true);
-    fetchSparks()
-      .then((res) => {
+    Promise.all([fetchSparks(), fetchClusters()])
+      .then(([res, clusterRes]) => {
         if (cancelled) return;
         setAllSparks(res.sparks);
+        setClusters(clusterRes.clusters);
         const found = res.sparks.find((s) => s.id === sparkId) || null;
         setConfig(found);
         setSavedConfig(found);
@@ -230,6 +233,7 @@ export function EditSparkDialog({
         workerNode: role === "worker",
         workerLabel: role === "worker" ? (config.workerLabel?.trim() || null) : null,
         workerHeadId: role === "worker" ? (config.workerHeadId?.trim() || null) : null,
+        clusterId: config.clusterId || null,
         llmMonitoring:
           role === "worker" ? false : role === "head" ? true : config.llmMonitoring !== false,
         comfyMonitoring: Boolean(config.comfyMonitoring),
@@ -375,6 +379,25 @@ export function EditSparkDialog({
                 />
                 This host (local collectors — no SSH for metrics)
               </label>
+
+              <div>
+                <label className="mb-1 block text-xs text-muted">Cluster</label>
+                <select
+                  value={config.clusterId || ""}
+                  onChange={(e) => update({ clusterId: e.target.value || null })}
+                  className="w-full rounded border border-border bg-surface-elevated px-3 py-1.5 text-xs text-text outline-none focus:border-accent"
+                >
+                  <option value="">None</option>
+                  {clusters.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name}
+                    </option>
+                  ))}
+                </select>
+                <p className="mt-1 text-[10px] text-muted">
+                  Groups this Spark on Overview and in the tab bar. Create clusters from Overview.
+                </p>
+              </div>
 
               <div>
                 <label className="mb-1 flex items-center gap-1.5 text-xs text-muted">

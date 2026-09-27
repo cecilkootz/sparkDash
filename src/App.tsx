@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect, useMemo } from "react";
 import { useSnapshot } from "./hooks/useSnapshot";
 import { useAppRoute, useRoute } from "./hooks/useRoute";
-import { fetchSparks, reorderSparks, fetchSettings } from "./api/client";
+import { fetchSparks, fetchClusters, reorderSparks, fetchSettings } from "./api/client";
 import { SparkTabs } from "./components/SparkTabs";
 import { AddSparkDialog } from "./components/AddSparkDialog";
 import { EditSparkDialog } from "./components/EditSparkDialog";
@@ -11,13 +11,15 @@ import { OverviewPage } from "./components/OverviewPage/OverviewPage";
 import { ShowcasePage } from "./components/ShowcasePage/ShowcasePage";
 import { ThemeSwitch } from "./components/ThemeSwitch";
 import { SettingsDialog } from "./components/SettingsDialog";
+import { ClusterDialog } from "./components/ClusterDialog";
 import { TokenPrompt } from "./components/TokenPrompt";
 import { GearIcon, BoltIcon } from "./components/ui/icons";
 import { ConnectionBanner } from "./components/ui/ConnectionBanner";
 import { ErrorBanner } from "./components/ui/ErrorBanner";
 import { OVERVIEW_ID } from "./constants";
-import type { Settings, SparkSnapshot } from "./api/types";
+import type { Cluster, Settings, SparkSnapshot } from "./api/types";
 import { isWorkerSpark } from "./api/sparkRole";
+import { sortByCluster } from "./api/clusters";
 
 /** Keep hidden worker ids in their original slots when the visible tabs are reordered. */
 function mergeTabOrderKeepingHidden(
@@ -50,6 +52,7 @@ function placeholderSnapshot(
     workerNode?: boolean;
     workerLabel?: string | null;
     workerHeadId?: string | null;
+    clusterId?: string | null;
     llmMonitoring?: boolean;
     comfyMonitoring?: boolean;
     comfyPort?: number;
@@ -80,6 +83,7 @@ function placeholderSnapshot(
     role,
     workerLabel: workerNode ? roleFields?.workerLabel ?? null : null,
     workerHeadId: workerNode ? roleFields?.workerHeadId ?? null : null,
+    clusterId: roleFields?.clusterId ?? null,
     llmMonitoring:
       role === "worker"
         ? false
@@ -127,6 +131,7 @@ function placeholderSnapshot(
 function DashboardApp() {
   const {
     sparks,
+    clusters: wsClusters,
     activeId,
     setActiveId,
     activeSpark,
@@ -144,6 +149,9 @@ function DashboardApp() {
   const [actionError, setActionError] = useState<string | null>(null);
   /** Used when WS is down so add/delete still updates the tab bar */
   const [fallbackSparks, setFallbackSparks] = useState<SparkSnapshot[]>([]);
+  const [fallbackClusters, setFallbackClusters] = useState<Cluster[]>([]);
+  /** undefined = dialog closed; null = creating a new cluster. */
+  const [editCluster, setEditCluster] = useState<Cluster | null | undefined>(undefined);
   const staleAfterMs = Math.max(10_000, 3 * (refreshInterval ?? 2_000));
   const telemetryStale =
     lastValidSnapshotAt != null && telemetryNow - lastValidSnapshotAt > staleAfterMs;
@@ -157,11 +165,12 @@ function DashboardApp() {
 
   // Prefer live WS data; fall back to API-fetched list when empty
   const liveSparks = sparks.length > 0 ? sparks : fallbackSparks;
+  const clusters = sparks.length > 0 ? wsClusters : fallbackClusters;
   /** Optimistic tab order while drag-save races the next WS snapshot */
   const [orderOverride, setOrderOverride] = useState<string[] | null>(null);
 
   const displaySparks = useMemo(() => {
-    if (!orderOverride?.length) return liveSparks;
+    if (!orderOverride?.length) return sortByCluster(liveSparks, clusters);
     const map = new Map(liveSparks.map((s) => [s.id, s]));
     const ordered: SparkSnapshot[] = [];
     for (const id of orderOverride) {
@@ -172,8 +181,8 @@ function DashboardApp() {
       }
     }
     for (const s of map.values()) ordered.push(s);
-    return ordered;
-  }, [liveSparks, orderOverride]);
+    return sortByCluster(ordered, clusters);
+  }, [liveSparks, orderOverride, clusters]);
 
   // Drop override once server/WS order matches
   useEffect(() => {
@@ -229,7 +238,11 @@ function DashboardApp() {
 
   const refreshFromApi = useCallback(async () => {
     try {
-      const { sparks: configs } = await fetchSparks();
+      const [{ sparks: configs }, { clusters: nextClusters }] = await Promise.all([
+        fetchSparks(),
+        fetchClusters(),
+      ]);
+      setFallbackClusters(nextClusters);
       setFallbackSparks(
         configs.map((c) => {
           const existing = sparks.find((s) => s.id === c.id);
@@ -243,6 +256,7 @@ function DashboardApp() {
               workerNode: c.workerNode ?? existing.workerNode,
               workerLabel: c.workerLabel ?? existing.workerLabel,
               workerHeadId: c.workerHeadId ?? existing.workerHeadId,
+              clusterId: c.clusterId ?? null,
               llmMonitoring: c.llmMonitoring ?? existing.llmMonitoring,
               comfyMonitoring: c.comfyMonitoring ?? existing.comfyMonitoring,
               comfyPort: c.comfyPort ?? existing.comfyPort,
@@ -265,6 +279,7 @@ function DashboardApp() {
               workerNode: c.workerNode,
               workerLabel: c.workerLabel,
               workerHeadId: c.workerHeadId,
+              clusterId: c.clusterId,
               llmMonitoring: c.llmMonitoring,
               comfyMonitoring: c.comfyMonitoring,
               comfyPort: c.comfyPort,
@@ -319,6 +334,7 @@ function DashboardApp() {
           </button>
           <SparkTabs
             sparks={tabSparks}
+            clusters={clusters}
             activeId={displayActive?.id ?? activeId}
             onSelect={navigate}
             onAdd={() => setShowAdd(true)}
@@ -350,6 +366,8 @@ function DashboardApp() {
           {isOverview ? (
             <OverviewPage
               sparks={displaySparks}
+              clusters={clusters}
+              onEditCluster={setEditCluster}
               hideOffline={settings?.autoHideOffline ?? false}
               hideWorkers={hideWorkers}
               showFleetEnergy={settings?.showFleetEnergy ?? false}
@@ -401,6 +419,16 @@ function DashboardApp() {
             const next = displaySparks.find((s) => s.id !== id);
             navigate(next?.id ?? OVERVIEW_ID);
           }
+          void refreshFromApi();
+        }}
+      />
+      <ClusterDialog
+        open={editCluster !== undefined}
+        cluster={editCluster ?? null}
+        clusters={clusters}
+        sparks={displaySparks}
+        onClose={() => setEditCluster(undefined)}
+        onSaved={() => {
           void refreshFromApi();
         }}
       />

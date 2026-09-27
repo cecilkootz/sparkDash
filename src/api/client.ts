@@ -1,4 +1,5 @@
 import type {
+  Cluster,
   DecodeBenchJob,
   DecodeBenchListResponse,
   FleetEnergy,
@@ -44,6 +45,37 @@ async function apiFetch<T>(path: string, opts?: RequestInit): Promise<T> {
     throw new Error(body.error || `HTTP ${res.status}`);
   }
   return res.json();
+}
+
+/** `?cluster=` suffix that scopes a batch action to one cluster. */
+function clusterQuery(clusterId?: string): string {
+  return clusterId ? `?cluster=${encodeURIComponent(clusterId)}` : "";
+}
+
+// ─── Clusters ────────────────────────────────────────────
+export function fetchClusters(): Promise<{ clusters: Cluster[] }> {
+  return apiFetch("/api/clusters");
+}
+
+export function createCluster(input: {
+  name: string;
+  sparkIds?: string[];
+}): Promise<{ success: boolean; cluster: Cluster; clusters: Cluster[] }> {
+  return apiFetch("/api/clusters", { method: "POST", body: JSON.stringify(input) });
+}
+
+export function updateCluster(
+  id: string,
+  updates: { name?: string; sparkIds?: string[] }
+): Promise<{ success: boolean; cluster: Cluster; clusters: Cluster[] }> {
+  return apiFetch(`/api/clusters/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify(updates),
+  });
+}
+
+export function deleteCluster(id: string): Promise<{ success: boolean; clusters: Cluster[] }> {
+  return apiFetch(`/api/clusters/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
 
 // ─── Sparks CRUD ─────────────────────────────────────────
@@ -376,8 +408,8 @@ export function updateHermes(id: string): Promise<{ success: boolean; reason?: s
 }
 
 /** Run `hermes update` on every Spark with Hermes Agent monitoring enabled. */
-export function updateAllHermes(): Promise<HermesBatchUpdateResponse> {
-  return apiFetch("/api/sparks/hermes/update-all", { method: "POST" });
+export function updateAllHermes(clusterId?: string): Promise<HermesBatchUpdateResponse> {
+  return apiFetch(`/api/sparks/hermes/update-all${clusterQuery(clusterId)}`, { method: "POST" });
 }
 
 /** Force an immediate `hermes update --check` on the Spark. */
@@ -417,14 +449,14 @@ export function wakeSpark(id: string): Promise<PowerResult> {
   return apiFetch(`/api/sparks/${id}/wake`, { method: "POST" });
 }
 
-/** Shut down Sparks that are currently online. */
-export function shutdownAllSparks(): Promise<BatchPowerResult> {
-  return apiFetch("/api/sparks/shutdown-all", { method: "POST" });
+/** Shut down Sparks (optionally one cluster's) that are currently online. */
+export function shutdownAllSparks(clusterId?: string): Promise<BatchPowerResult> {
+  return apiFetch(`/api/sparks/shutdown-all${clusterQuery(clusterId)}`, { method: "POST" });
 }
 
-/** Send WoL to all registered Sparks that have a MAC configured. */
-export function wakeAllSparks(): Promise<BatchPowerResult> {
-  return apiFetch("/api/sparks/wake-all", { method: "POST" });
+/** Send WoL to all registered Sparks (optionally one cluster's) that have a MAC configured. */
+export function wakeAllSparks(clusterId?: string): Promise<BatchPowerResult> {
+  return apiFetch(`/api/sparks/wake-all${clusterQuery(clusterId)}`, { method: "POST" });
 }
 
 // ─── Hermes update preview ───────────────────────────────

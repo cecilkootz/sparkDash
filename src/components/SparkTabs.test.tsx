@@ -49,4 +49,27 @@ describe("SparkTabs accessibility and scale", () => {
     expect(document.querySelectorAll('[role="menuitem"]')).toHaveLength(14);
     expect(document.querySelector('#mobile-spark-menu [aria-current="page"]')?.textContent).toContain("Spark m3");
   });
+
+  it("labels each cluster group", () => {
+    mockWidth(1440);
+    const sparks = [
+      { ...makeSpark("a"), clusterId: "c1" },
+      { ...makeSpark("b"), clusterId: "c1" },
+      makeSpark("c"),
+    ];
+    const clusters = [{ id: "c1", name: "Rack", sparkIds: ["a", "b"] }];
+    const { container } = render(
+      <SparkTabs sparks={sparks} clusters={clusters} activeId="a" onSelect={() => {}} onAdd={() => {}} />
+    );
+    const labels = [...container.querySelectorAll(".pill-group-label")].map((el) => el.textContent);
+    expect(labels).toEqual(["Rack", "Ungrouped"]);
+  });
+
+  it("shows no group labels when there are no clusters", () => {
+    mockWidth(1440);
+    const { container } = render(
+      <SparkTabs sparks={[makeSpark("a"), makeSpark("b")]} activeId="a" onSelect={() => {}} onAdd={() => {}} />
+    );
+    expect(container.querySelectorAll(".pill-group-label")).toHaveLength(0);
+  });
 });

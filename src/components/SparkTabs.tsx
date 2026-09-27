@@ -18,12 +18,14 @@ import {
   useSortable,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import type { SparkSnapshot } from "../api/types";
+import type { Cluster, SparkSnapshot } from "../api/types";
 import { PlusIcon, GridIcon } from "./ui/icons";
 import { OVERVIEW_ID } from "../constants";
 
 interface SparkTabsProps {
+  /** Expected pre-sorted so each cluster's members are contiguous. */
   sparks: SparkSnapshot[];
+  clusters?: Cluster[];
   activeId: string | null;
   onSelect: (id: string) => void;
   onAdd: () => void;
@@ -42,6 +44,27 @@ function GripIcon() {
       <circle cx="8" cy="9" r="1" />
     </svg>
   );
+}
+
+/** Known cluster id for a Spark, or null when ungrouped / cluster missing. */
+function groupKey(spark: SparkSnapshot | undefined, names: Map<string, string>): string | null {
+  return spark?.clusterId && names.has(spark.clusterId) ? spark.clusterId : null;
+}
+
+/** Group label to render before `spark`, or undefined when it continues the previous group. */
+function groupLabelBefore(
+  spark: SparkSnapshot,
+  prev: SparkSnapshot | undefined,
+  names: Map<string, string>
+): string | undefined {
+  if (names.size === 0) return undefined;
+  const key = groupKey(spark, names);
+  if (prev && groupKey(prev, names) === key) return undefined;
+  return key ? names.get(key) : "Ungrouped";
+}
+
+function GroupLabel({ name }: { name: string }) {
+  return <span className="pill-group-label shrink-0">{name}</span>;
 }
 
 /* ─── Mobile helpers ──────────────────────────────────── */
@@ -233,6 +256,7 @@ function SortableTab({
 
 export function SparkTabs({
   sparks,
+  clusters = [],
   activeId,
   onSelect,
   onAdd,
@@ -263,6 +287,7 @@ export function SparkTabs({
   }, [sparks, activeDragId]);
 
   const byId = useMemo(() => new Map(sparks.map((s) => [s.id, s])), [sparks]);
+  const clusterNames = useMemo(() => new Map(clusters.map((c) => [c.id, c.name])), [clusters]);
   const ordered = items.map((id) => byId.get(id)).filter(Boolean) as SparkSnapshot[];
   const activeDragSpark = activeDragId ? byId.get(activeDragId) : null;
 
@@ -294,6 +319,7 @@ export function SparkTabs({
         </button>
         <MobileSparkMenu
           sparks={sparks}
+          clusterNames={clusterNames}
           activeId={activeId}
           onSelect={onSelect}
           onAdd={onAdd}
@@ -314,6 +340,13 @@ export function SparkTabs({
     const { active, over } = event;
     setActiveDragId(null);
     if (!over || active.id === over.id) return;
+    // Tabs are grouped by cluster; a cross-group drop would just snap back.
+    if (
+      groupKey(byId.get(String(active.id)), clusterNames) !==
+      groupKey(byId.get(String(over.id)), clusterNames)
+    ) {
+      return;
+    }
 
     setItems((prev) => {
       const oldIndex = prev.indexOf(String(active.id));
@@ -333,16 +366,22 @@ export function SparkTabs({
     return (
       <nav className="pill-nav" aria-label="Sparks">
         <OverviewTab isActive={activeId === OVERVIEW_ID} onSelect={onSelect} />
-        {sparks.map((spark) => (
-          <div key={spark.id} className="shrink-0">
-            <TabChrome
-              spark={spark}
-              isActive={activeId === spark.id}
-              onSelect={onSelect}
-              onEdit={onEdit}
-            />
-          </div>
-        ))}
+        {sparks.map((spark, i) => {
+          const label = groupLabelBefore(spark, sparks[i - 1], clusterNames);
+          return (
+            <div key={spark.id} className="contents">
+              {label && <GroupLabel name={label} />}
+              <div className="shrink-0">
+                <TabChrome
+                  spark={spark}
+                  isActive={activeId === spark.id}
+                  onSelect={onSelect}
+                  onEdit={onEdit}
+                />
+              </div>
+            </div>
+          );
+        })}
         <AddButton onAdd={onAdd} />
       </nav>
     );
@@ -362,15 +401,20 @@ export function SparkTabs({
             rows once there are more Sparks than fit one line, and the
             horizontal strategy only ever shifts items along X. */}
         <SortableContext items={items} strategy={rectSortingStrategy}>
-          {ordered.map((spark) => (
-            <SortableTab
-              key={spark.id}
-              spark={spark}
-              isActive={activeId === spark.id}
-              onSelect={onSelect}
-              onEdit={onEdit}
-            />
-          ))}
+          {ordered.map((spark, i) => {
+            const label = groupLabelBefore(spark, ordered[i - 1], clusterNames);
+            return (
+              <div key={spark.id} className="contents">
+                {label && <GroupLabel name={label} />}
+                <SortableTab
+                  spark={spark}
+                  isActive={activeId === spark.id}
+                  onSelect={onSelect}
+                  onEdit={onEdit}
+                />
+              </div>
+            );
+          })}
         </SortableContext>
         <AddButton onAdd={onAdd} />
       </nav>
@@ -429,6 +473,7 @@ function OverviewTab({
 
 function MobileSparkMenu({
   sparks,
+  clusterNames,
   activeId,
   onSelect,
   onAdd,
@@ -436,6 +481,7 @@ function MobileSparkMenu({
   onClose,
 }: {
   sparks: SparkSnapshot[];
+  clusterNames: Map<string, string>;
   activeId: string | null;
   onSelect: (id: string) => void;
   onAdd: () => void;
@@ -497,23 +543,32 @@ function MobileSparkMenu({
         <GridIcon className="h-3.5 w-3.5" />
         Overview
       </button>
-      {sparks.map((spark) => (
-        <button
-          key={spark.id}
-          type="button"
-          role="menuitem"
-          className={`mobile-menu-item ${activeId === spark.id ? "is-active" : ""}`}
-          aria-current={activeId === spark.id ? "page" : undefined}
-          onClick={() => handleItemClick(spark.id)}
-        >
-          <span
-            className={`inline-block h-2 w-2 shrink-0 rounded-full ${
-              spark.online ? "bg-success" : "bg-danger"
-            }`}
-          />
-          {spark.name}
-        </button>
-      ))}
+      {sparks.map((spark, i) => {
+        const label = groupLabelBefore(spark, sparks[i - 1], clusterNames);
+        return (
+          <div key={spark.id} className="contents">
+            {label && (
+              <div className="mobile-menu-group" role="presentation">
+                {label}
+              </div>
+            )}
+            <button
+              type="button"
+              role="menuitem"
+              className={`mobile-menu-item ${activeId === spark.id ? "is-active" : ""}`}
+              aria-current={activeId === spark.id ? "page" : undefined}
+              onClick={() => handleItemClick(spark.id)}
+            >
+              <span
+                className={`inline-block h-2 w-2 shrink-0 rounded-full ${
+                  spark.online ? "bg-success" : "bg-danger"
+                }`}
+              />
+              {spark.name}
+            </button>
+          </div>
+        );
+      })}
       <button
         type="button"
         role="menuitem"

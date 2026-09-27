@@ -1,4 +1,5 @@
 import fs from "fs";
+import { randomBytes } from "crypto";
 import { SPARKS_JSON_PATH, LLM_PORT } from "../config.js";
 import { loadSecrets, saveSecrets } from "../secretsStore.js";
 import { atomicWrite } from "../util/atomicWrite.js";
@@ -17,6 +18,8 @@ import { isValidSparkId } from "../validate.js";
 export class SparkRegistry {
   constructor() {
     this._sparks = [];
+    /** @type {{ id: string, name: string }[]} Membership lives on spark.clusterId. */
+    this._clusters = [];
     /** @type {Map<string, string>} sparkId -> password */
     this._passwords = new Map();
     /** @type {Map<string, Record<string, string>>} sparkId -> { portStr -> apiKey } */
@@ -37,6 +40,18 @@ export class SparkRegistry {
 
   get sparkIds() {
     return this._sparks.map((s) => s.id);
+  }
+
+  /** Clusters in display order, each with member ids in registry order. */
+  get clusters() {
+    return this._clusters.map((c) => ({
+      ...c,
+      sparkIds: this._sparks.filter((s) => s.clusterId === c.id).map((s) => s.id),
+    }));
+  }
+
+  getCluster(id) {
+    return this.clusters.find((c) => c.id === id) || null;
   }
 
   /** Find a Spark by ID (includes in-memory secrets if present). */
@@ -73,6 +88,7 @@ export class SparkRegistry {
     }
     if (this.getSpark(config.id)) throw new Error(`Spark ${config.id} already exists`);
     const spark = this._normalizeConfig(config);
+    this._assertClusterExists(spark.clusterId);
     const nextSparks = [...this._sparks, spark];
     this._save(nextSparks);
     try {
@@ -161,6 +177,9 @@ export class SparkRegistry {
     };
     const nextSparks = [...this._sparks];
     nextSparks[idx] = this._normalizeConfig(updated);
+    if (nextSparks[idx].clusterId !== prev.clusterId) {
+      this._assertClusterExists(nextSparks[idx].clusterId);
+    }
     this._save(nextSparks);
     try {
       if (hasPasswordUpdate) this._storePassword(id, passwordUpdate);
@@ -223,8 +242,95 @@ export class SparkRegistry {
     return this.publicSparks;
   }
 
+  // ─── Clusters ───────────────────────────────────────────
+  /**
+   * @param {{ name: string, sparkIds?: string[] }} input
+   * @returns {object} public cluster
+   */
+  addCluster(input) {
+    const name = this._validateClusterName(input?.name);
+    let id;
+    do id = `cluster-${randomBytes(4).toString("hex")}`;
+    while (this._clusters.some((c) => c.id === id));
+    const nextClusters = [...this._clusters, { id, name }];
+    const nextSparks = input?.sparkIds
+      ? this._assignMembers(id, input.sparkIds)
+      : this._sparks;
+    this._save(nextSparks, nextClusters);
+    this._sparks = nextSparks;
+    this._clusters = nextClusters;
+    this._emit("cluster", null);
+    return this.getCluster(id);
+  }
+
+  /**
+   * Rename and/or replace membership. `sparkIds` is the full member list;
+   * listed Sparks move here from any other cluster.
+   * @param {string} id
+   * @param {{ name?: string, sparkIds?: string[] }} updates
+   */
+  updateCluster(id, updates) {
+    const idx = this._clusters.findIndex((c) => c.id === id);
+    if (idx === -1) throw notFound(`Cluster ${id} not found`);
+    const nextClusters = [...this._clusters];
+    if (updates?.name !== undefined) {
+      nextClusters[idx] = { id, name: this._validateClusterName(updates.name, id) };
+    }
+    const nextSparks =
+      updates?.sparkIds !== undefined ? this._assignMembers(id, updates.sparkIds) : this._sparks;
+    this._save(nextSparks, nextClusters);
+    this._sparks = nextSparks;
+    this._clusters = nextClusters;
+    this._emit("cluster", null);
+    return this.getCluster(id);
+  }
+
+  /** Delete a cluster; its members become ungrouped. */
+  removeCluster(id) {
+    const removed = this.getCluster(id);
+    if (!removed) return null;
+    const nextClusters = this._clusters.filter((c) => c.id !== id);
+    const nextSparks = this._sparks.map((s) =>
+      s.clusterId === id ? { ...s, clusterId: null } : s
+    );
+    this._save(nextSparks, nextClusters);
+    this._sparks = nextSparks;
+    this._clusters = nextClusters;
+    this._emit("cluster", null);
+    return removed;
+  }
+
+  _assignMembers(clusterId, sparkIds) {
+    if (!Array.isArray(sparkIds) || sparkIds.some((s) => typeof s !== "string")) {
+      throw badRequest("sparkIds must be an array of spark ids");
+    }
+    const unknown = sparkIds.filter((sid) => !this._sparks.some((s) => s.id === sid));
+    if (unknown.length) throw badRequest(`Unknown spark id(s): ${unknown.join(", ")}`);
+    const members = new Set(sparkIds);
+    return this._sparks.map((s) => {
+      if (members.has(s.id)) return s.clusterId === clusterId ? s : { ...s, clusterId };
+      return s.clusterId === clusterId ? { ...s, clusterId: null } : s;
+    });
+  }
+
+  _validateClusterName(value, selfId = null) {
+    const name = typeof value === "string" ? value.trim() : "";
+    if (!name || name.length > 64) throw badRequest("Cluster name must be 1–64 characters");
+    const lower = name.toLowerCase();
+    if (this._clusters.some((c) => c.id !== selfId && c.name.toLowerCase() === lower)) {
+      throw badRequest(`A cluster named "${name}" already exists`);
+    }
+    return name;
+  }
+
+  _assertClusterExists(clusterId) {
+    if (clusterId && !this._clusters.some((c) => c.id === clusterId)) {
+      throw badRequest(`Cluster ${clusterId} not found`);
+    }
+  }
+
   // ─── Events ─────────────────────────────────────────────
-  /** Register a listener: fn(action, spark) where action is 'add'|'update'|'remove' */
+  /** Register a listener: fn(action, spark) where action is 'add'|'update'|'remove'|'reorder'|'cluster' */
   onChange(fn) {
     this._listeners.add(fn);
     return () => this._listeners.delete(fn);
@@ -247,6 +353,7 @@ export class SparkRegistry {
       const raw = fs.readFileSync(SPARKS_JSON_PATH, "utf-8");
       const data = JSON.parse(raw);
       const loaded = data.sparks || [];
+      this._clusters = this._normalizeClusters(data.clusters);
       this._sparks = [];
       let migratedSecrets = false;
       for (const s of loaded) {
@@ -259,7 +366,12 @@ export class SparkRegistry {
               `rotate this credential if it was previously exposed.`
           );
         }
-        this._sparks.push(this._normalizeConfig(s));
+        const spark = this._normalizeConfig(s);
+        if (spark.clusterId && !this._clusters.some((c) => c.id === spark.clusterId)) {
+          console.warn(`[SparkRegistry] ${spark.id}: dropping unknown clusterId ${spark.clusterId}`);
+          spark.clusterId = null;
+        }
+        this._sparks.push(spark);
       }
       if (migratedSecrets || loaded.some((s) => s?.ssh?.password)) {
         this._persistSecrets();
@@ -310,7 +422,7 @@ export class SparkRegistry {
     }
   }
 
-  _save(source = this._sparks) {
+  _save(source = this._sparks, clusters = this._clusters) {
     try {
       // Never write passwords / API keys to sparks.json
       const sparks = source.map((s) => {
@@ -320,7 +432,7 @@ export class SparkRegistry {
         const { llmApiKeys: _k, llmApiKeyPorts: _p, ...rest } = s;
         return { ...rest, ssh };
       });
-      const data = { sparks };
+      const data = { sparks, clusters };
       // Atomic write (tmp + rename) — a SIGKILL/power loss mid-write must not
       // truncate the registry and silently drop every Spark on next restart.
       // 0o644 keeps the registry readable so root/non-root container users share it.
@@ -629,7 +741,24 @@ export class SparkRegistry {
       disabledDevices: Array.isArray(config.disabledDevices) ? config.disabledDevices : [],
       disabledInterfaces: Array.isArray(config.disabledInterfaces) ? config.disabledInterfaces : [],
       storagePollDisabled: Boolean(config.storagePollDisabled),
+      clusterId:
+        typeof config.clusterId === "string" && config.clusterId.trim()
+          ? config.clusterId.trim()
+          : null,
     };
+  }
+
+  /** Drop malformed and duplicate entries from persisted clusters. */
+  _normalizeClusters(value) {
+    if (!Array.isArray(value)) return [];
+    const out = [];
+    for (const c of value) {
+      const id = typeof c?.id === "string" ? c.id.trim() : "";
+      const name = typeof c?.name === "string" ? c.name.trim() : "";
+      if (!id || !name || out.some((o) => o.id === id)) continue;
+      out.push({ id, name });
+    }
+    return out;
   }
 
   /** Normalize ComfyUI port to 1–65535 (default 8188). */
@@ -691,4 +820,16 @@ export class SparkRegistry {
     if (Number.isInteger(n) && n >= 1 && n <= 65535) return [n];
     return [LLM_PORT];
   }
+}
+
+function badRequest(message) {
+  const err = new Error(message);
+  err.status = 400;
+  return err;
+}
+
+function notFound(message) {
+  const err = new Error(message);
+  err.status = 404;
+  return err;
 }

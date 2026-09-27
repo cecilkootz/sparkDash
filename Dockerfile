@@ -41,9 +41,11 @@ RUN npm prune --omit=dev --no-audit --no-fund \
 # ============================================================
 FROM ${NODE_IMAGE}
 
-# SSH client + sshpass for remote Sparks; util-linux provides nsenter for host GPU/net
+# SSH client + sshpass for remote Sparks; util-linux provides nsenter for host GPU/net.
+# tini reaps ssh ControlPersist masters, which are orphaned to PID 1 once
+# backgrounded (a Kubernetes pod has its own PID namespace with node as PID 1).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    openssh-client sshpass procps util-linux iproute2 \
+    openssh-client sshpass procps util-linux iproute2 tini \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -69,4 +71,8 @@ ENV PORT=5555
 ENV LLM_PORT=8888
 ENV NODE_ENV=production
 
+# Root by default: compose local mode needs nsenter. Kubernetes runs this as
+# uid 1000 (node) with a read-only root; runtime writes stay in /app/config and /tmp.
+# -s: compose uses pid: host, where tini is not PID 1 and must be a subreaper.
+ENTRYPOINT ["/usr/bin/tini", "-s", "--"]
 CMD ["node", "server/index.js"]

@@ -36,6 +36,7 @@ It also supports **non-Spark units**: any Linux machine with an NVIDIA GPU (e.g.
 - [Tailnet monitoring](#tailnet-monitoring)
 - [Full changelog](./CHANGELOG.md)
 - [Quick start](#quick-start)
+- [Kubernetes](#kubernetes)
 - [Architecture](#architecture)
 - [Tech stack](#tech-stack)
 - [Repository layout](#repository-layout)
@@ -269,6 +270,25 @@ docker compose -f docker-compose.dev.yml up --build
 ```
 
 If the key file has a non-default name (e.g. `id_ed25519_shared`), mount it **as** `id_ed25519`, or set `SSH_IDENTITY_FILE` to the path inside the container. Keep the file mode `600`. The unit that runs sparkDash itself should be added with **This host (local collectors — no SSH for metrics)**.
+
+---
+
+## Kubernetes
+
+CI publishes `ghcr.io/cecilkootz/sparkdash` (linux/arm64): `latest` from `main`, `sha-<short>`, and `<version>` / `<major>.<minor>` from `v*` tags. The Helm chart lives in the home-infra repo at `charts/sparkdash`.
+
+In a pod every unit is remote, polled over SSH with key auth (no host mounts, `nsenter`, or privileges). The image runs as uid/gid 1000 with a read-only root filesystem; it writes only to `/app/config` (PVC) and `/tmp` (emptyDir). The SPA asks for the token on first load.
+
+| Variable | Pod value |
+|----------|-----------|
+| `BIND_HOST` / `PORT` / `NODE_ENV` | `0.0.0.0` / `5555` / `production` |
+| `SPARKDASH_TOKEN` | From a Secret; required on `/api/*` and `/ws` |
+| `SPARKDASH_ALLOW_OPEN_REMOTE` | `0` |
+| `SPARKDASH_SECRETS_KEY` | From a Secret |
+| `SSH_IDENTITY_FILE` | `/etc/sparkdash/ssh/id_ed25519` (Secret, mode `0440`, readable via `fsGroup`) |
+| `SSH_KNOWN_HOSTS_FILE` | `/app/config/ssh/known_hosts`, so accepted host keys survive restarts |
+
+Probe with `tcpSocket` on 5555; `/api/health` requires the token.
 
 ---
 

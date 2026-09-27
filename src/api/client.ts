@@ -18,12 +18,13 @@ import type {
   PrefillBenchListResponse,
   StartPrefillBenchRequest,
 } from "./types";
+import { readStoredToken, requestToken } from "./token";
 
 const BASE = "";
-const TOKEN = (typeof localStorage !== "undefined" && localStorage.getItem("sparkdashToken")) || "";
 
-function authHeaders(): Record<string, string> {
-  return TOKEN ? { Authorization: `Bearer ${TOKEN}` } : {};
+export function authHeaders(): Record<string, string> {
+  const token = readStoredToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
 // ─── Generic fetch wrapper ────────────────────────────────
@@ -38,6 +39,7 @@ async function apiFetch<T>(path: string, opts?: RequestInit): Promise<T> {
     headers: { ...headers, ...authHeaders(), ...(opts?.headers as Record<string, string> | undefined) },
   });
   if (!res.ok) {
+    if (res.status === 401) requestToken();
     const body = await res.json().catch(() => ({ error: res.statusText }));
     throw new Error(body.error || `HTTP ${res.status}`);
   }
@@ -434,6 +436,14 @@ export function fetchHermesUpdates(id: string): Promise<HermesUpdatesResponse> {
 // ─── Global settings ──────────────────────────────────────
 export function fetchSettings(): Promise<Settings> {
   return apiFetch("/api/settings");
+}
+
+/** Browsers hide a WebSocket upgrade's 401, so a failed socket asks the API instead. */
+export function probeAuth(): Promise<void> {
+  return fetchSettings().then(
+    () => undefined,
+    () => undefined
+  );
 }
 
 export function updateSettings(patch: Partial<Settings>): Promise<Settings> {

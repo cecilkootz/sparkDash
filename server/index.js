@@ -312,7 +312,8 @@ const app = express();
 const server = createServer(app);
 
 app.use(express.json());
-app.use(createAuthMiddleware());
+// The SPA shell and assets stay public so the browser can load the token prompt.
+app.use("/api", createAuthMiddleware());
 
 app.get("/api/health", (_req, res) => {
   res.json(inspectHealth(process.env.BIND_HOST || "127.0.0.1"));

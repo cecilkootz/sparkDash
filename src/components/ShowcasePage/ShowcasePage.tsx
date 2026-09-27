@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  authHeaders,
   cancelShowcase,
   clearShowcaseHistory,
   fetchSparkMetrics,
@@ -706,7 +707,7 @@ export function ShowcasePage({ sparkId }: ShowcasePageProps) {
       if (!sid || sessionStatus !== "running") return;
       const url = `/api/sparks/${encodeURIComponent(sparkId)}/llm/showcase/${encodeURIComponent(sid)}`;
       try {
-        void fetch(url, { method: "DELETE", keepalive: true });
+        void fetch(url, { method: "DELETE", keepalive: true, headers: authHeaders() });
       } catch {
         /* ignore */
       }

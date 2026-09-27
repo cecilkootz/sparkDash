@@ -27,11 +27,21 @@ function tokensEqual(left, right) {
   return timingSafeEqual(a, b);
 }
 
+// ws verifyClient hands us a raw IncomingMessage, which has no Express `query`.
+function queryToken(req) {
+  if (req.query) return req.query.token;
+  try {
+    return new URL(req.url || "", "http://localhost").searchParams.get("token");
+  } catch {
+    return null;
+  }
+}
+
 export function extractBearer(req) {
   const header = req.headers?.authorization || "";
   const match = /^Bearer\s+(.+)$/i.exec(header);
   if (match) return match[1].trim();
-  const query = req.query?.token;
+  const query = queryToken(req);
   return typeof query === "string" ? query.trim() : "";
 }
 
